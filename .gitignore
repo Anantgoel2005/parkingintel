@@ -1,0 +1,29 @@
+# Data files (too large)
+data/raw/
+data/processed/
+
+# API keys
+*.env
+src/chatbot.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+_check.py
+_t.py
+_ck.py
+_test.py
+_*.py
