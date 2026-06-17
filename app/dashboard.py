@@ -4,6 +4,7 @@ Theme 1: Poor Visibility on Parking-Induced Congestion
 """
 
 import streamlit as st
+import folium
 import pandas as pd
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from src.visualization import (
     plot_weekend_scatter, plot_hourly_bar, plot_blindspot_ranking,
 )
 from src.chatbot import render_chat
+from src.planner import predict_hotspots as plan_hotspots, suggest_patrol_order, format_plan
 
 st.set_page_config(page_title="ParkingIntel", page_icon="🚗", layout="wide")
 
@@ -114,9 +116,10 @@ c2.metric("Showing", f"{len(display_df):,}")
 c3.metric("Stations", f"{df['police_station'].nunique()}")
 c4.metric("Period", "Nov '23 - Apr '24")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🗺️ Hotspot Map", "📊 Station Comparison", "⏰ Time Patterns",
     "🔍 Gap Analysis", "🚘 Vehicle Profiles", "📅 Weekday vs Weekend",
+    "🎯 Enforcement Planner",
 ])
 
 # ═══════════════════════════════════════════════════════════
@@ -319,6 +322,69 @@ with tab6:
     st.divider()
     st.markdown("### Ask ParkingIntel")
     render_chat("6")
+
+# ═══════════════════════════════════════════════════════════
+# TAB 7: Enforcement Planner
+# ═══════════════════════════════════════════════════════════
+with tab7:
+    st.header("Enforcement Planner")
+    st.caption(
+        "Select a day and time window. The system predicts where violations "
+        "are most likely to concentrate based on historical patterns, and "
+        "suggests an efficient patrol route."
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        plan_day = st.selectbox("Day", options=range(7), format_func=lambda x: day_options[x], index=5)
+    with col2:
+        plan_start, plan_end = st.select_slider(
+            "Time Window",
+            options=list(range(24)),
+            value=(16, 20),
+            format_func=lambda x: f"{x:02d}:00",
+        )
+    with col3:
+        n_officers = st.number_input("Available Officers", min_value=1, max_value=10, value=3)
+
+    if st.button("Generate Patrol Plan", type="primary"):
+        with st.spinner("Analyzing historical patterns..."):
+            zones = plan_hotspots(df, day_of_week=plan_day, start_hour=plan_start, end_hour=plan_end, n_officers=n_officers)
+
+        if len(zones) == 0:
+            st.warning("Not enough historical data for this time window. Try a different day or broader time range.")
+        else:
+            ordered = suggest_patrol_order(zones)
+            plan_text = format_plan(ordered, day_options[plan_day], plan_start, plan_end, n_officers)
+
+            # Show the plan
+            st.success(f"Plan ready — {len(ordered)} priority zones identified")
+            st.markdown(plan_text.replace("  \n", "\n"))
+
+            # Show zones on a mini map
+            st.subheader("Patrol Route Map")
+            pm = create_base_map()
+            for _, zone in ordered.iterrows():
+                color = "#00ff00" if zone["stop_number"] == 1 else "#ffcc00"
+                folium.Marker(
+                    location=[zone["latitude"], zone["longitude"]],
+                    icon=folium.DivIcon(
+                        html=f'<div style="background:{color};color:#000;border-radius:50%;width:28px;height:28px;text-align:center;line-height:28px;font-weight:bold;font-size:14px;border:2px solid #fff">{int(zone["stop_number"])}</div>'
+                    ),
+                ).add_to(pm)
+            # Fit map to show all zones
+            if len(ordered) > 0:
+                pm.fit_bounds([[ordered["latitude"].min(), ordered["longitude"].min()],
+                               [ordered["latitude"].max(), ordered["longitude"].max()]])
+            st.components.v1.html(pm._repr_html_(), height=450)
+
+            st.caption(
+                "Green = starting point (highest priority). Yellow = subsequent stops. "
+                "Route optimized for minimum travel distance. Numbers show recommended visit order."
+            )
+    else:
+        st.info("Select a day, time window, and number of officers, then click **Generate Patrol Plan**.")
+
 
 # ── Footer ──
 st.sidebar.divider()
