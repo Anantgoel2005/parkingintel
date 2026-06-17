@@ -5,41 +5,82 @@ import numpy as np
 
 
 def predict_hotspots(df, day_of_week, start_hour, end_hour, n_officers=3):
+    """Predict top hotspots with congestion-impact weighting.
+
+    Accuracy improvements:
+    - Finer grid (330m cells)
+    - Commercial vehicles weighted 2x (more congestion impact)
+    - Consistency bonus for zones that appear on many dates
+    - Exponential recency decay (not flat 50%)
+    - Junction proximity bonus
+    """
     days = day_of_week if isinstance(day_of_week, (list, tuple)) else [day_of_week]
     mask = df["day_of_week"].isin(days) & df["hour"].between(start_hour, end_hour)
-    window_df = df[mask]
+    window_df = df[mask].copy()
     if len(window_df) == 0:
         return pd.DataFrame(columns=["latitude","longitude","expected_violations","priority_score","confidence"])
 
-    grid_size = 0.005
-    window_df = window_df.copy()
+    # Finer grid: 0.003 degrees (~330m at Bangalore's latitude)
+    grid_size = 0.003
     window_df["lat_bin"] = (window_df["latitude"] // grid_size) * grid_size + grid_size / 2
     window_df["lng_bin"] = (window_df["longitude"] // grid_size) * grid_size + grid_size / 2
 
+    # Commercial vehicles cause more congestion — weight them 2x
+    commercial_types = ["LGV", "HGV", "TANKER", "MAXI-CAB", "PRIVATE BUS",
+                        "BUS (BMTC/KSRTC)", "LORRY/GOODS VEHICLE"]
+    window_df["weight"] = window_df["vehicle_type"].apply(
+        lambda x: 2.0 if x in commercial_types else 1.0
+    )
+
+    # Aggregate by zone with weighted counts
     zones = window_df.groupby(["lat_bin","lng_bin"]).agg(
-        expected_violations=("latitude","count"),
+        raw_count=("latitude","count"),
+        weighted_count=("weight","sum"),
         unique_vehicles=("vehicle_type","nunique"),
         unique_dates=("date","nunique"),
+        # Junction bonus: zones with named junctions get higher priority
+        has_junction=("junction_name", lambda x: (x.notna() & (x != "No Junction") & (x != "NULL")).sum()),
     ).reset_index()
-    zones = zones[zones["unique_dates"] >= 3]
 
+    # Junction proximity score (0-1)
+    zones["junction_score"] = (zones["has_junction"] / zones["raw_count"]).clip(upper=1.0)
+
+    # Recency: exponential decay (newer = much more relevant)
     max_date = pd.to_datetime(df["date"]).max()
-    recent_cutoff = pd.to_datetime(max_date) - pd.Timedelta(days=30)
-    recent = window_df[pd.to_datetime(window_df["date"]) >= recent_cutoff].groupby(["lat_bin","lng_bin"]).size().reset_index(name="recent_count")
-    zones = zones.merge(recent, on=["lat_bin","lng_bin"], how="left")
-    zones["recent_count"] = zones["recent_count"].fillna(0)
-    zones["priority_score"] = zones["expected_violations"] + zones["recent_count"] * 0.5
+    window_df["days_ago"] = (max_date - pd.to_datetime(window_df["date"])).dt.days
+    window_df["recency_weight"] = np.exp(-window_df["days_ago"] / 60)  # half-life ~42 days
+    recency = window_df.groupby(["lat_bin","lng_bin"])["recency_weight"].sum().reset_index(name="recency_sum")
+    zones = zones.merge(recency, on=["lat_bin","lng_bin"], how="left")
+    zones["recency_sum"] = zones["recency_sum"].fillna(0)
 
+    # Consistency: % of possible days this zone appears
     total_days = window_df["date"].nunique()
-    zones["confidence"] = (zones["unique_dates"] / max(total_days, 1) * 100).clip(upper=100)
+    zones["consistency"] = (zones["unique_dates"] / max(total_days, 1)).clip(upper=1.0)
 
+    # Priority score:
+    # weighted_count * (1 + junction_bonus * 0.3) * (1 + recency_factor) * consistency
+    avg_recency = zones["recency_sum"].mean()
+    zones["recency_factor"] = zones["recency_sum"] / max(avg_recency, 0.01)
+    zones["priority_score"] = (
+        zones["weighted_count"]
+        * (1 + zones["junction_score"] * 0.3)
+        * (1 + zones["recency_factor"] * 0.5)
+        * (0.5 + zones["consistency"] * 0.5)
+    )
+
+    # Confidence: combination of consistency + vehicle diversity signal
+    zones["confidence"] = (
+        zones["consistency"] * 60
+        + (zones["unique_vehicles"] / max(zones["unique_vehicles"].max(), 1)) * 40
+    ).clip(upper=100)
+
+    # Return top zones (3 per officer)
     n_zones = n_officers * 3
     result = zones.nlargest(n_zones, "priority_score")[
-        ["lat_bin","lng_bin","expected_violations","priority_score","confidence"]
+        ["lat_bin","lng_bin","weighted_count","priority_score","confidence","consistency","junction_score"]
     ]
-    result.columns = ["latitude","longitude","expected_violations","priority_score","confidence"]
+    result.columns = ["latitude","longitude","expected_violations","priority_score","confidence","consistency","junction_score"]
     return result.reset_index(drop=True)
-
 
 def suggest_patrol_order(zones_df):
     if len(zones_df) <= 1:
@@ -61,6 +102,7 @@ def suggest_patrol_order(zones_df):
     return result
 
 
+
 def format_plan(zones_df, day_name, start_hour, end_hour, n_officers):
     if len(zones_df) == 0:
         return "No reliable hotspots found for this time window."
@@ -78,8 +120,6 @@ def format_plan(zones_df, day_name, start_hour, end_hour, n_officers):
         lng = row["longitude"]
         ev = row["expected_violations"]
         cf = row["confidence"]
-        lines.append(
-            f"**Stop {sn}:** ({lat:.4f}, {lng:.4f})"
-            f" - ~{ev:.0f} violations ({cf:.0f}% confidence)"
-        )
+        jn = " (near junction)" if row.get("junction_score", 0) > 0.3 else ""
+        lines.append(f"**Stop {sn}:** ({lat:.4f}, {lng:.4f}){jn} - ~{ev:.0f} violations ({cf:.0f}% confidence)")
     return "  \n".join(lines)

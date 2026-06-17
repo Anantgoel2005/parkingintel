@@ -35,6 +35,24 @@ st.markdown('''
 [data-testid="stMetric"]:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(255,107,53,.15); }
 .stTabs [role="tab"]:hover { color:#ff6b35!important; }
 ::-webkit-scrollbar{width:8px} ::-webkit-scrollbar-track{background:#1a1a2e} ::-webkit-scrollbar-thumb{background:#ff6b35;border-radius:4px}
+
+/* Planner tab — prominent styling */
+div[data-testid="stTabs"] button[data-baseweb="tab"]:first-child {
+    font-weight: 700; font-size: 15px;
+    border-bottom: 2px solid #ff6b35 !important;
+}
+div[data-baseweb="tab-panel"]:first-child h2 {
+    color: #ff6b35; font-size: 1.8rem;
+}
+/* Primary button glow */
+button[kind="primary"] {
+    box-shadow: 0 0 15px rgba(255,107,53,0.4);
+    transition: all 0.2s;
+}
+button[kind="primary"]:hover {
+    box-shadow: 0 0 25px rgba(255,107,53,0.6);
+    transform: scale(1.02);
+}
 </style>
 ''', unsafe_allow_html=True)
 
@@ -117,216 +135,15 @@ c3.metric("Stations", f"{df['police_station'].nunique()}")
 c4.metric("Period", "Nov '23 - Apr '24")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "🗺️ Hotspot Map", "📊 Station Comparison", "⏰ Time Patterns",
-    "🔍 Gap Analysis", "🚘 Vehicle Profiles", "📅 Weekday vs Weekend",
-    "🎯 Enforcement Planner",
+    "🎯 Enforcement Planner", "🗺️ Hotspot Map", "📊 Station Comparison",
+    "⏰ Time Patterns", "🔍 Gap Analysis", "🚘 Vehicle Profiles",
+    "📅 Weekday vs Weekend",
 ])
-
-# ═══════════════════════════════════════════════════════════
-# TAB 1: Hotspot Map
-# ═══════════════════════════════════════════════════════════
-with tab1:
-    st.header("Where is illegal parking concentrated?")
-
-    show_heatmap = st.checkbox("Show density overlay", True)
-    show_hotspots = st.checkbox("Show hotspot clusters", True)
-
-    m = create_base_map()
-    if show_heatmap and len(display_df) > 0:
-        m = add_violation_heatmap(m, display_df)
-    if show_hotspots and len(display_df) > 0:
-        with st.spinner("Finding hotspots..."):
-            hotspots = get_hotspots_cached(display_df)
-            if len(hotspots) > 0:
-                m = add_hotspot_markers(m, hotspots)
-    st.components.v1.html(m._repr_html_(), height=600)
-
-    st.caption(
-        f"Showing {len(display_df):,} violations. Red circles = high-density areas. "
-        "Use the Filters menu in the sidebar to narrow by time, station, or vehicle."
-    )
-
-    st.divider()
-    st.markdown("### 🤖 Ask ParkingIntel")
-    render_chat("1")
-# ═══════════════════════════════════════════════════════════
-# PAGE 2: Station Comparison
-# ═══════════════════════════════════════════════════════════
-with tab2:
-    st.header("How do stations compare?")
-    st.caption("These metrics help identify where additional support may be useful. They are not officer rankings.")
-
-    summary = get_summary(df)
-    metric = st.selectbox("View by", options=[
-        "overall_score","quality_score","coverage_score",
-        "responsiveness_score","balance_score",
-        "rejection_rate","zone_complexity","unprocessed_rate",
-    ], format_func=lambda x: {
-        "overall_score":"Overall Score","quality_score":"Ticket Accuracy",
-        "coverage_score":"Hours Active","responsiveness_score":"Processing Speed",
-        "balance_score":"Weekday/Weekend Fit","rejection_rate":"Rejection Rate",
-        "zone_complexity":"Zone Difficulty","unprocessed_rate":"Backlog",
-    }[x])
-
-    fig = plot_station_scorecard(summary, metric)
-    st.plotly_chart(fig, width='stretch')
-
-    with st.expander("How are these scores calculated?"):
-        st.markdown(
-            "**Quality:** Approval rate of recorded violations.\\n\\n"
-            "**Coverage:** Percentage of the 24-hour day with recorded activity.\\n\\n"
-            "**Responsiveness:** How quickly records are processed.\\n\\n"
-            "**Balance:** How well the weekday/weekend split fits a balanced pattern.\\n\\n"
-            "**Zone Difficulty:** Estimated from vehicle type diversity and number of junctions.\\n\\n"
-            "A lower score may mean older devices, a more complex area, or different shift patterns "
-            "— not that officers are performing poorly."
-        )
-
-    st.download_button("Download CSV", summary.to_csv(index=False), "stations.csv")
-
-    st.divider()
-    st.markdown("### Ask ParkingIntel")
-    render_chat("2")
-# ═══════════════════════════════════════════════════════════
-# PAGE 3: Time Patterns
-# ═══════════════════════════════════════════════════════════
-with tab3:
-    st.header("When do violations happen?")
-
-    hdf, enf, cong = enforcement_gap_analysis(df)
-    ratio = enf / max(cong, 1)
-    st.info(
-        f"**{enf:,} violations** recorded 4-7 AM vs **{cong:,}** at 5-8 PM "
-        f"({ratio:.0f}x difference). This may reflect overnight parking, morning "
-        "enforcement sweeps, or both."
-    )
-
-    st.subheader("Day x Hour")
-    st.plotly_chart(plot_hourly_heatmap(df), width='stretch')
-
-    st.subheader("By Hour")
-    st.plotly_chart(plot_hourly_bar(peak_hour_profile(df)), width='stretch')
-
-    with st.expander("What does the 4-7 AM spike mean?"):
-        st.markdown(
-            "**Possibility 1:** People park illegally overnight — commercial vehicles "
-            "loading at dawn, night-shift workers, residents leaving cars on streets.\\n\\n"
-            "**Possibility 2:** Officers conduct coordinated morning rounds when streets "
-            "are empty and violations are easiest to record.\\n\\n"
-            "**Takeaway:** Regardless of the cause, additional enforcement during "
-            "afternoon and evening hours would catch violations that directly "
-            "affect rush-hour traffic."
-        )
-
-    st.divider()
-    st.markdown("### Ask ParkingIntel")
-    render_chat("3")
-# ═══════════════════════════════════════════════════════════
-# PAGE 4: Gap Analysis
-# ═══════════════════════════════════════════════════════════
-with tab4:
-    st.header("Where could coverage be improved?")
-
-    st.markdown(
-        "Since the data only shows where violations **were** recorded, we use "
-        "indirect signals to identify areas that may benefit from more attention."
-    )
-
-    blindspots = get_blindspots(df)
-    st.plotly_chart(plot_blindspot_ranking(blindspots), width='stretch')
-
-    method = st.radio("Method", ["Combined","Vehicle Diversity","Time Coverage","Junction Density"], horizontal=True)
-
-    if method == "Vehicle Diversity":
-        st.caption("Areas with many vehicle types but few recorded violations.")
-        dd = vehicle_diversity_blindspots(df)
-        st.dataframe(dd.head(10)[["police_station","unique_vehicle_types","total_violations","blind_spot_score"]], use_container_width=True, hide_index=True)
-
-    elif method == "Time Coverage":
-        st.caption("Stations active for fewer hours of the day.")
-        td = time_coverage_blindspots(df)
-        st.dataframe(td.head(10)[["police_station","active_hours","coverage_pct","gap_score"]], use_container_width=True, hide_index=True)
-
-    elif method == "Junction Density":
-        st.caption("Stations covering many junctions with few recorded violations.")
-        jd = junction_density_blindspots(df)
-        st.dataframe(jd.head(10)[["police_station","unique_junctions","total_violations","violations_per_junction"]], use_container_width=True, hide_index=True)
-
-    else:
-        st.dataframe(blindspots.head(10)[["police_station","combined_blind_spot_score"]], use_container_width=True, hide_index=True)
-
-    with st.expander("How reliable are these signals?"):
-        st.markdown(
-            "These methods flag areas where the data pattern is **unusual** — not "
-            "where violations are definitely being missed. Each method has limitations. "
-            "Vehicle diversity assumes more types = more activity. Time coverage "
-            "assumes violations happen throughout the day. Junction density depends "
-            "on junction data being complete. Use these as starting points for "
-            "further review, not as conclusions."
-        )
-
-    st.divider()
-    st.markdown("### Ask ParkingIntel")
-    render_chat("4")
-# ═══════════════════════════════════════════════════════════
-# PAGE 5: Vehicle Profiles
-# ═══════════════════════════════════════════════════════════
-with tab5:
-    st.header("What vehicles are involved?")
-
-    station_pick = st.selectbox("Select a station", options=sorted(df["police_station"].dropna().unique()),
-                                 index=sorted(df["police_station"].dropna().unique()).index("City Market") if "City Market" in df["police_station"].unique() else 0)
-
-    st.plotly_chart(plot_vehicle_pie(df, station_pick), width='stretch')
-
-    fp = vehicle_fingerprint(df, station_pick)
-    top_v = max(fp, key=fp.get) if fp else "N/A"
-    st.info(f"**{station_pick}:** Most common vehicle is **{top_v}** ({fp.get(top_v, 0):.0f}% of records).")
-
-    with st.expander("Compare multiple stations"):
-        comp = st.multiselect("Select stations", options=sorted(df["police_station"].dropna().unique()), max_selections=5)
-        if comp:
-            cd = pd.DataFrame({s: vehicle_fingerprint(df, s) for s in comp}).fillna(0)
-            st.dataframe(cd, use_container_width=True)
-
-    st.divider()
-    st.markdown("### Ask ParkingIntel")
-    render_chat("5")
-# ═══════════════════════════════════════════════════════════
-# PAGE 6: Weekday vs Weekend
-# ═══════════════════════════════════════════════════════════
-with tab6:
-    st.header("Weekday vs Weekend patterns")
-
-    st.caption(
-        "Each station's recorded split. Some variation is natural — different "
-        "areas have different rhythms. We don't have shift schedule or land-use data, "
-        "so these are observations, not prescriptions."
-    )
-
-    weekend_df = get_weekend_data(df)
-    st.plotly_chart(plot_weekend_scatter(weekend_df), width='stretch')
-
-    lo = weekend_df.nsmallest(1, "weekend_pct").iloc[0]
-    hi = weekend_df.nlargest(1, "weekend_pct").iloc[0]
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Lowest weekend", f"{lo['weekend_pct']:.1f}%", lo.name)
-    c2.metric("Highest weekend", f"{hi['weekend_pct']:.1f}%", hi.name)
-    c3.metric("Spread", f"{hi['weekend_pct'] - lo['weekend_pct']:.1f} pp")
-
-    disp = weekend_df.sort_values("weekend_pct", ascending=False)[["weekday","weekend","weekend_pct"]]
-    disp.columns = ["Weekday","Weekend","Weekend %"]
-    disp["Weekend %"] = disp["Weekend %"].round(1)
-    st.dataframe(disp, use_container_width=True)
-
-    st.divider()
-    st.markdown("### Ask ParkingIntel")
-    render_chat("6")
 
 # ═══════════════════════════════════════════════════════════
 # TAB 7: Enforcement Planner
 # ═══════════════════════════════════════════════════════════
-with tab7:
+with tab2:
     st.header("Enforcement Planner")
     st.caption(
         "Select a day and time window. The system predicts where violations "
@@ -386,6 +203,182 @@ with tab7:
         st.info("Select a day, time window, and number of officers, then click **Generate Patrol Plan**.")
 
 
+
+# ═══════════════════════════════════════════════════════════
+# PAGE 2: Station Comparison
+# ═══════════════════════════════════════════════════════════
+with tab3:
+    st.header("How do stations compare?")
+    st.caption("These metrics help identify where additional support may be useful. They are not officer rankings.")
+
+    summary = get_summary(df)
+    metric = st.selectbox("View by", options=[
+        "overall_score","quality_score","coverage_score",
+        "responsiveness_score","balance_score",
+        "rejection_rate","zone_complexity","unprocessed_rate",
+    ], format_func=lambda x: {
+        "overall_score":"Overall Score","quality_score":"Ticket Accuracy",
+        "coverage_score":"Hours Active","responsiveness_score":"Processing Speed",
+        "balance_score":"Weekday/Weekend Fit","rejection_rate":"Rejection Rate",
+        "zone_complexity":"Zone Difficulty","unprocessed_rate":"Backlog",
+    }[x])
+
+    fig = plot_station_scorecard(summary, metric)
+    st.plotly_chart(fig, width='stretch')
+
+    with st.expander("How are these scores calculated?"):
+        st.markdown(
+            "**Quality:** Approval rate of recorded violations.\\n\\n"
+            "**Coverage:** Percentage of the 24-hour day with recorded activity.\\n\\n"
+            "**Responsiveness:** How quickly records are processed.\\n\\n"
+            "**Balance:** How well the weekday/weekend split fits a balanced pattern.\\n\\n"
+            "**Zone Difficulty:** Estimated from vehicle type diversity and number of junctions.\\n\\n"
+            "A lower score may mean older devices, a more complex area, or different shift patterns "
+            "— not that officers are performing poorly."
+        )
+
+    st.download_button("Download CSV", summary.to_csv(index=False), "stations.csv")
+
+    st.divider()
+    st.markdown("### Ask ParkingIntel")
+    render_chat("2")
+# ═══════════════════════════════════════════════════════════
+# PAGE 3: Time Patterns
+# ═══════════════════════════════════════════════════════════
+with tab4:
+    st.header("When do violations happen?")
+
+    hdf, enf, cong = enforcement_gap_analysis(df)
+    ratio = enf / max(cong, 1)
+    st.info(
+        f"**{enf:,} violations** recorded 4-7 AM vs **{cong:,}** at 5-8 PM "
+        f"({ratio:.0f}x difference). This may reflect overnight parking, morning "
+        "enforcement sweeps, or both."
+    )
+
+    st.subheader("Day x Hour")
+    st.plotly_chart(plot_hourly_heatmap(df), width='stretch')
+
+    st.subheader("By Hour")
+    st.plotly_chart(plot_hourly_bar(peak_hour_profile(df)), width='stretch')
+
+    with st.expander("What does the 4-7 AM spike mean?"):
+        st.markdown(
+            "**Possibility 1:** People park illegally overnight — commercial vehicles "
+            "loading at dawn, night-shift workers, residents leaving cars on streets.\\n\\n"
+            "**Possibility 2:** Officers conduct coordinated morning rounds when streets "
+            "are empty and violations are easiest to record.\\n\\n"
+            "**Takeaway:** Regardless of the cause, additional enforcement during "
+            "afternoon and evening hours would catch violations that directly "
+            "affect rush-hour traffic."
+        )
+
+    st.divider()
+    st.markdown("### Ask ParkingIntel")
+    render_chat("3")
+# ═══════════════════════════════════════════════════════════
+# PAGE 4: Gap Analysis
+# ═══════════════════════════════════════════════════════════
+with tab5:
+    st.header("Where could coverage be improved?")
+
+    st.markdown(
+        "Since the data only shows where violations **were** recorded, we use "
+        "indirect signals to identify areas that may benefit from more attention."
+    )
+
+    blindspots = get_blindspots(df)
+    st.plotly_chart(plot_blindspot_ranking(blindspots), width='stretch')
+
+    method = st.radio("Method", ["Combined","Vehicle Diversity","Time Coverage","Junction Density"], horizontal=True)
+
+    if method == "Vehicle Diversity":
+        st.caption("Areas with many vehicle types but few recorded violations.")
+        dd = vehicle_diversity_blindspots(df)
+        st.dataframe(dd.head(10)[["police_station","unique_vehicle_types","total_violations","blind_spot_score"]], use_container_width=True, hide_index=True)
+
+    elif method == "Time Coverage":
+        st.caption("Stations active for fewer hours of the day.")
+        td = time_coverage_blindspots(df)
+        st.dataframe(td.head(10)[["police_station","active_hours","coverage_pct","gap_score"]], use_container_width=True, hide_index=True)
+
+    elif method == "Junction Density":
+        st.caption("Stations covering many junctions with few recorded violations.")
+        jd = junction_density_blindspots(df)
+        st.dataframe(jd.head(10)[["police_station","unique_junctions","total_violations","violations_per_junction"]], use_container_width=True, hide_index=True)
+
+    else:
+        st.dataframe(blindspots.head(10)[["police_station","combined_blind_spot_score"]], use_container_width=True, hide_index=True)
+
+    with st.expander("How reliable are these signals?"):
+        st.markdown(
+            "These methods flag areas where the data pattern is **unusual** — not "
+            "where violations are definitely being missed. Each method has limitations. "
+            "Vehicle diversity assumes more types = more activity. Time coverage "
+            "assumes violations happen throughout the day. Junction density depends "
+            "on junction data being complete. Use these as starting points for "
+            "further review, not as conclusions."
+        )
+
+    st.divider()
+    st.markdown("### Ask ParkingIntel")
+    render_chat("4")
+# ═══════════════════════════════════════════════════════════
+# PAGE 5: Vehicle Profiles
+# ═══════════════════════════════════════════════════════════
+with tab6:
+    st.header("What vehicles are involved?")
+
+    station_pick = st.selectbox("Select a station", options=sorted(df["police_station"].dropna().unique()),
+                                 index=sorted(df["police_station"].dropna().unique()).index("City Market") if "City Market" in df["police_station"].unique() else 0)
+
+    st.plotly_chart(plot_vehicle_pie(df, station_pick), width='stretch')
+
+    fp = vehicle_fingerprint(df, station_pick)
+    top_v = max(fp, key=fp.get) if fp else "N/A"
+    st.info(f"**{station_pick}:** Most common vehicle is **{top_v}** ({fp.get(top_v, 0):.0f}% of records).")
+
+    with st.expander("Compare multiple stations"):
+        comp = st.multiselect("Select stations", options=sorted(df["police_station"].dropna().unique()), max_selections=5)
+        if comp:
+            cd = pd.DataFrame({s: vehicle_fingerprint(df, s) for s in comp}).fillna(0)
+            st.dataframe(cd, use_container_width=True)
+
+    st.divider()
+    st.markdown("### Ask ParkingIntel")
+    render_chat("5")
+# ═══════════════════════════════════════════════════════════
+# PAGE 6: Weekday vs Weekend
+# ═══════════════════════════════════════════════════════════
+with tab7:
+    st.header("Weekday vs Weekend patterns")
+
+    st.caption(
+        "Each station's recorded split. Some variation is natural — different "
+        "areas have different rhythms. We don't have shift schedule or land-use data, "
+        "so these are observations, not prescriptions."
+    )
+
+    weekend_df = get_weekend_data(df)
+    st.plotly_chart(plot_weekend_scatter(weekend_df), width='stretch')
+
+    lo = weekend_df.nsmallest(1, "weekend_pct").iloc[0]
+    hi = weekend_df.nlargest(1, "weekend_pct").iloc[0]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Lowest weekend", f"{lo['weekend_pct']:.1f}%", lo.name)
+    c2.metric("Highest weekend", f"{hi['weekend_pct']:.1f}%", hi.name)
+    c3.metric("Spread", f"{hi['weekend_pct'] - lo['weekend_pct']:.1f} pp")
+
+    disp = weekend_df.sort_values("weekend_pct", ascending=False)[["weekday","weekend","weekend_pct"]]
+    disp.columns = ["Weekday","Weekend","Weekend %"]
+    disp["Weekend %"] = disp["Weekend %"].round(1)
+    st.dataframe(disp, use_container_width=True)
+
+    st.divider()
+    st.markdown("### Ask ParkingIntel")
+    render_chat("6")
+
+# ═══════════════════════════════════════════════════════════
 # ── Footer ──
 st.sidebar.divider()
 st.sidebar.caption("ParkingIntel - Hackathon Project")
