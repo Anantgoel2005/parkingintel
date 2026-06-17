@@ -2,6 +2,7 @@
 
 import pandas as pd
 import numpy as np
+from src.cis_engine import compute_cis, HOURLY_DEMAND, VEHICLE_SEVERITY
 
 
 def predict_hotspots(df, day_of_week, start_hour, end_hour, n_officers=3):
@@ -61,8 +62,25 @@ def predict_hotspots(df, day_of_week, start_hour, end_hour, n_officers=3):
     # weighted_count * (1 + junction_bonus * 0.3) * (1 + recency_factor) * consistency
     avg_recency = zones["recency_sum"].mean()
     zones["recency_factor"] = zones["recency_sum"] / max(avg_recency, 0.01)
+    # Compute CIS for the window data to get congestion-aware weighting
+    window_df_cis = compute_cis(window_df)
+    window_df_cis["lat_bin"] = (window_df_cis["latitude"] // grid_size) * grid_size + grid_size / 2
+    window_df_cis["lng_bin"] = (window_df_cis["longitude"] // grid_size) * grid_size + grid_size / 2
+    cis_agg = window_df_cis.groupby(["lat_bin", "lng_bin"]).agg(
+        cis_total=("cis_score", "sum"),
+        cis_mean=("cis_score", "mean"),
+    ).reset_index()
+    zones = zones.merge(cis_agg, on=["lat_bin", "lng_bin"], how="left")
+    zones["cis_total"] = zones["cis_total"].fillna(zones["weighted_count"])
+    zones["cis_mean"] = zones["cis_mean"].fillna(2.0)
+
+    # CIS factor: normalize to 0.5-2.0 range (higher congestion impact = higher priority)
+    cis_median = zones["cis_mean"].median()
+    zones["cis_factor"] = (zones["cis_mean"] / max(cis_median, 0.01)).clip(0.5, 3.0)
+
     zones["priority_score"] = (
         zones["weighted_count"]
+        * zones["cis_factor"]
         * (1 + zones["junction_score"] * 0.3)
         * (1 + zones["recency_factor"] * 0.5)
         * (0.5 + zones["consistency"] * 0.5)
@@ -95,6 +113,7 @@ def cluster_and_assign(zones_df, n_officers, time_window_hours):
 
     from sklearn.cluster import KMeans
     import numpy as np
+    from src.cis_engine import compute_cis, HOURLY_DEMAND, VEHICLE_SEVERITY
 
     # Convert lat/lng to approximate km for clustering
     lat_mean = zones_df["latitude"].mean()
