@@ -24,7 +24,7 @@ from src.visualization import (
     plot_weekend_scatter, plot_hourly_bar, plot_blindspot_ranking,
 )
 from src.chatbot import render_chat
-from src.planner import predict_hotspots as plan_hotspots, suggest_patrol_order, format_plan
+from src.planner import predict_hotspots as plan_hotspots, cluster_and_assign, format_plan
 
 st.set_page_config(page_title="ParkingIntel", page_icon="🚗", layout="wide")
 
@@ -35,24 +35,6 @@ st.markdown('''
 [data-testid="stMetric"]:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(255,107,53,.15); }
 .stTabs [role="tab"]:hover { color:#ff6b35!important; }
 ::-webkit-scrollbar{width:8px} ::-webkit-scrollbar-track{background:#1a1a2e} ::-webkit-scrollbar-thumb{background:#ff6b35;border-radius:4px}
-
-/* Planner tab — prominent styling */
-div[data-testid="stTabs"] button[data-baseweb="tab"]:first-child {
-    font-weight: 700; font-size: 15px;
-    border-bottom: 2px solid #ff6b35 !important;
-}
-div[data-baseweb="tab-panel"]:first-child h2 {
-    color: #ff6b35; font-size: 1.8rem;
-}
-/* Primary button glow */
-button[kind="primary"] {
-    box-shadow: 0 0 15px rgba(255,107,53,0.4);
-    transition: all 0.2s;
-}
-button[kind="primary"]:hover {
-    box-shadow: 0 0 25px rgba(255,107,53,0.6);
-    transform: scale(1.02);
-}
 </style>
 ''', unsafe_allow_html=True)
 
@@ -135,79 +117,42 @@ c3.metric("Stations", f"{df['police_station'].nunique()}")
 c4.metric("Period", "Nov '23 - Apr '24")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "🎯 Enforcement Planner", "🗺️ Hotspot Map", "📊 Station Comparison",
-    "⏰ Time Patterns", "🔍 Gap Analysis", "🚘 Vehicle Profiles",
-    "📅 Weekday vs Weekend",
+    "🗺️ Hotspot Map", "📊 Station Comparison", "⏰ Time Patterns",
+    "🔍 Gap Analysis", "🚘 Vehicle Profiles", "📅 Weekday vs Weekend",
+    "🎯 Enforcement Planner",
 ])
 
 # ═══════════════════════════════════════════════════════════
-# TAB 7: Enforcement Planner
+# TAB 1: Hotspot Map
 # ═══════════════════════════════════════════════════════════
-with tab2:
-    st.header("Enforcement Planner")
+with tab1:
+    st.header("Where is illegal parking concentrated?")
+
+    show_heatmap = st.checkbox("Show density overlay", True)
+    show_hotspots = st.checkbox("Show hotspot clusters", True)
+
+    m = create_base_map()
+    if show_heatmap and len(display_df) > 0:
+        m = add_violation_heatmap(m, display_df)
+    if show_hotspots and len(display_df) > 0:
+        with st.spinner("Finding hotspots..."):
+            hotspots = get_hotspots_cached(display_df)
+            if len(hotspots) > 0:
+                m = add_hotspot_markers(m, hotspots)
+    st.components.v1.html(m._repr_html_(), height=600)
+
     st.caption(
-        "Select a day and time window. The system predicts where violations "
-        "are most likely to concentrate based on historical patterns, and "
-        "suggests an efficient patrol route."
+        f"Showing {len(display_df):,} violations. Red circles = high-density areas. "
+        "Use the Filters menu in the sidebar to narrow by time, station, or vehicle."
     )
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        plan_day = st.selectbox("Day", options=range(7), format_func=lambda x: day_options[x], index=5)
-    with col2:
-        plan_start, plan_end = st.select_slider(
-            "Time Window",
-            options=list(range(24)),
-            value=(16, 20),
-            format_func=lambda x: f"{x:02d}:00",
-        )
-    with col3:
-        n_officers = st.number_input("Available Officers", min_value=1, max_value=10, value=3)
-
-    if st.button("Generate Patrol Plan", type="primary"):
-        with st.spinner("Analyzing historical patterns..."):
-            zones = plan_hotspots(df, day_of_week=plan_day, start_hour=plan_start, end_hour=plan_end, n_officers=n_officers)
-
-        if len(zones) == 0:
-            st.warning("Not enough historical data for this time window. Try a different day or broader time range.")
-        else:
-            ordered = suggest_patrol_order(zones)
-            plan_text = format_plan(ordered, day_options[plan_day], plan_start, plan_end, n_officers)
-
-            # Show the plan
-            st.success(f"Plan ready — {len(ordered)} priority zones identified")
-            st.markdown(plan_text.replace("  \n", "\n"))
-
-            # Show zones on a mini map
-            st.subheader("Patrol Route Map")
-            pm = create_base_map()
-            for _, zone in ordered.iterrows():
-                color = "#00ff00" if zone["stop_number"] == 1 else "#ffcc00"
-                folium.Marker(
-                    location=[zone["latitude"], zone["longitude"]],
-                    icon=folium.DivIcon(
-                        html=f'<div style="background:{color};color:#000;border-radius:50%;width:28px;height:28px;text-align:center;line-height:28px;font-weight:bold;font-size:14px;border:2px solid #fff">{int(zone["stop_number"])}</div>'
-                    ),
-                ).add_to(pm)
-            # Fit map to show all zones
-            if len(ordered) > 0:
-                pm.fit_bounds([[ordered["latitude"].min(), ordered["longitude"].min()],
-                               [ordered["latitude"].max(), ordered["longitude"].max()]])
-            st.components.v1.html(pm._repr_html_(), height=450)
-
-            st.caption(
-                "Green = starting point (highest priority). Yellow = subsequent stops. "
-                "Route optimized for minimum travel distance. Numbers show recommended visit order."
-            )
-    else:
-        st.info("Select a day, time window, and number of officers, then click **Generate Patrol Plan**.")
-
-
-
+    st.divider()
+    st.markdown("### 🤖 Ask ParkingIntel")
+    render_chat("1")
 # ═══════════════════════════════════════════════════════════
 # PAGE 2: Station Comparison
 # ═══════════════════════════════════════════════════════════
-with tab3:
+with tab2:
     st.header("How do stations compare?")
     st.caption("These metrics help identify where additional support may be useful. They are not officer rankings.")
 
@@ -245,7 +190,7 @@ with tab3:
 # ═══════════════════════════════════════════════════════════
 # PAGE 3: Time Patterns
 # ═══════════════════════════════════════════════════════════
-with tab4:
+with tab3:
     st.header("When do violations happen?")
 
     hdf, enf, cong = enforcement_gap_analysis(df)
@@ -279,7 +224,7 @@ with tab4:
 # ═══════════════════════════════════════════════════════════
 # PAGE 4: Gap Analysis
 # ═══════════════════════════════════════════════════════════
-with tab5:
+with tab4:
     st.header("Where could coverage be improved?")
 
     st.markdown(
@@ -326,7 +271,7 @@ with tab5:
 # ═══════════════════════════════════════════════════════════
 # PAGE 5: Vehicle Profiles
 # ═══════════════════════════════════════════════════════════
-with tab6:
+with tab5:
     st.header("What vehicles are involved?")
 
     station_pick = st.selectbox("Select a station", options=sorted(df["police_station"].dropna().unique()),
@@ -350,7 +295,7 @@ with tab6:
 # ═══════════════════════════════════════════════════════════
 # PAGE 6: Weekday vs Weekend
 # ═══════════════════════════════════════════════════════════
-with tab7:
+with tab6:
     st.header("Weekday vs Weekend patterns")
 
     st.caption(
@@ -379,6 +324,77 @@ with tab7:
     render_chat("6")
 
 # ═══════════════════════════════════════════════════════════
+# TAB 7: Enforcement Planner
+# ═══════════════════════════════════════════════════════════
+with tab7:
+    st.header("Enforcement Planner")
+    st.caption(
+        "Select a day and time window. The system predicts where violations "
+        "are most likely to concentrate based on historical patterns, and "
+        "suggests an efficient patrol route."
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        plan_day = st.selectbox("Day", options=range(7), format_func=lambda x: day_options[x], index=5)
+    with col2:
+        plan_start, plan_end = st.select_slider(
+            "Time Window",
+            options=list(range(24)),
+            value=(16, 20),
+            format_func=lambda x: f"{x:02d}:00",
+        )
+    with col3:
+        n_officers = st.number_input("Available Officers", min_value=1, max_value=10, value=3)
+
+    if st.button("Generate Patrol Plan", type="primary"):
+                # Check if quick-plan was triggered from sidebar
+        if "quick_plan" in st.session_state and st.session_state["quick_plan"] is not None:
+            plan_day, plan_start, plan_end, n_officers = st.session_state["quick_plan"]
+            st.session_state["quick_plan"] = None
+
+        with st.spinner("Analyzing historical patterns..."):
+            zones = plan_hotspots(df, day_of_week=plan_day, start_hour=plan_start, end_hour=plan_end, n_officers=n_officers)
+
+        if len(zones) == 0:
+            st.warning("Not enough historical data for this time window. Try a different day or broader time range.")
+        else:
+            window_hours = plan_end - plan_start
+            assignments = cluster_and_assign(zones, n_officers, window_hours)
+            plan_text = format_plan(assignments, day_options[plan_day], plan_start, plan_end, n_officers)
+
+            total_zones = sum(a["total_zones"] for a in assignments)
+            st.success(f"Plan ready — {total_zones} zones assigned to {len(assignments)} officer(s)")
+            st.markdown(plan_text.replace("  \n", "\n"))
+
+            # Show per-officer clusters on map
+            st.subheader("Patrol Zones — Per Officer")
+            officer_colors = ["#ff4444", "#44aaff", "#44ff44", "#ffaa44", "#ff44ff"]
+            pm = create_base_map()
+            all_points = []
+            for a in assignments:
+                color = officer_colors[(a["officer_id"] - 1) % len(officer_colors)]
+                for stop in a["stops"]:
+                    all_points.append([stop["latitude"], stop["longitude"]])
+                    folium.CircleMarker(
+                        location=[stop["latitude"], stop["longitude"]],
+                        radius=10, color=color, weight=3, fill=True,
+                        fill_color=color, fill_opacity=0.6,
+                        popup=f"Officer {a['officer_id']} — Stop {stop['stop_number']}",
+                    ).add_to(pm)
+            if all_points:
+                pm.fit_bounds(all_points)
+            st.components.v1.html(pm._repr_html_(), height=450)
+
+            st.caption(
+                "Each color = one officer's patrol area. Zones are geographically "
+                "clustered and filtered to only include stops reachable within the "
+                f"{window_hours}-hour window at 20 km/h (Bangalore average with traffic)."
+            )
+    else:
+        st.info("Select a day, time window, and number of officers, then click **Generate Patrol Plan**.")
+
+
 # ── Footer ──
 st.sidebar.divider()
 st.sidebar.caption("ParkingIntel - Hackathon Project")

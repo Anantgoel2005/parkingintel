@@ -82,44 +82,135 @@ def predict_hotspots(df, day_of_week, start_hour, end_hour, n_officers=3):
     result.columns = ["latitude","longitude","expected_violations","priority_score","confidence","consistency","junction_score"]
     return result.reset_index(drop=True)
 
-def suggest_patrol_order(zones_df):
-    if len(zones_df) <= 1:
-        zones_df["stop_number"] = 1
-        return zones_df
-    remaining = zones_df.copy()
-    ordered = []
-    current = remaining.iloc[0]
-    ordered.append(current)
-    remaining = remaining.iloc[1:]
-    while len(remaining) > 0:
-        d = np.sqrt((remaining["latitude"]-current["latitude"])**2 + (remaining["longitude"]-current["longitude"])**2)
-        nearest = d.idxmin()
-        current = remaining.loc[nearest]
-        ordered.append(current)
-        remaining = remaining.drop(nearest)
-    result = pd.DataFrame(ordered).reset_index(drop=True)
-    result["stop_number"] = range(1, len(result)+1)
-    return result
+def cluster_and_assign(zones_df, n_officers, time_window_hours):
+    """Assign officers to geographic clusters with realistic time constraints.
 
-
-
-def format_plan(zones_df, day_name, start_hour, end_hour, n_officers):
+    - Clusters hotspots geographically (one cluster per officer)
+    - Estimates travel time at 20 km/h (Bangalore average with traffic)
+    - Assumes 20 min per stop for actual enforcement
+    - Only includes zones reachable within the time window
+    """
     if len(zones_df) == 0:
+        return []
+
+    from sklearn.cluster import KMeans
+    import numpy as np
+
+    # Convert lat/lng to approximate km for clustering
+    lat_mean = zones_df["latitude"].mean()
+    zones = zones_df.copy()
+    zones["x_km"] = (zones["longitude"] - zones["longitude"].mean()) * 111.32 * np.cos(np.radians(lat_mean))
+    zones["y_km"] = (zones["latitude"] - zones["latitude"].mean()) * 111.32
+
+    # Cluster into n_officers groups (or fewer if not enough zones)
+    n_clusters = min(n_officers, len(zones))
+    if n_clusters > 1 and len(zones) >= n_clusters:
+        coords = zones[["x_km", "y_km"]].values
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        zones["cluster"] = kmeans.fit_predict(coords)
+    else:
+        zones["cluster"] = 0
+
+    # Constants for time estimation
+    AVG_SPEED_KMPH = 20  # Bangalore average with traffic
+    MINUTES_PER_STOP = 20  # Time to actually enforce at each location
+    TOTAL_MINUTES = time_window_hours * 60
+
+    assignments = []
+    for cluster_id in range(n_clusters):
+        cluster_zones = zones[zones["cluster"] == cluster_id].copy()
+        if len(cluster_zones) == 0:
+            continue
+
+        # Greedy nearest-neighbor route within cluster
+        remaining = cluster_zones.reset_index(drop=True)
+        route = []
+        current = remaining.iloc[0]
+        route.append(current)
+        remaining = remaining.drop(0)
+
+        while len(remaining) > 0:
+            dists = np.sqrt(
+                (remaining["x_km"] - current["x_km"])**2
+                + (remaining["y_km"] - current["y_km"])**2
+            )
+            nearest = dists.idxmin()
+            current = remaining.loc[nearest]
+            route.append(current)
+            remaining = remaining.drop(nearest)
+
+        # Calculate time: travel between stops + enforcement at each stop
+        total_km = 0
+        feasible_stops = []
+        time_used = 0
+
+        # Start from an arbitrary central point (officer deployment)
+        prev = route[0]
+
+        for i, stop in enumerate(route):
+            # Travel from previous stop
+            travel_km = np.sqrt(
+                (stop["x_km"] - prev["x_km"])**2
+                + (stop["y_km"] - prev["y_km"])**2
+            )
+            travel_min = (travel_km / AVG_SPEED_KMPH) * 60
+            stop_time = travel_min + MINUTES_PER_STOP
+
+            if time_used + stop_time > TOTAL_MINUTES:
+                break  # Can't reach this stop within the time window
+
+            time_used += stop_time
+            total_km += travel_km
+            feasible_stops.append({
+                **stop.to_dict(),
+                "stop_number": len(feasible_stops) + 1,
+                "travel_km": travel_km,
+                "travel_min": travel_min,
+                "arrive_by_min": time_used - MINUTES_PER_STOP,
+            })
+            prev = stop
+
+        if feasible_stops:
+            assignments.append({
+                "officer_id": cluster_id + 1,
+                "stops": feasible_stops,
+                "total_zones": len(feasible_stops),
+                "total_km": round(total_km, 1),
+                "total_min": round(time_used, 0),
+                "expected_violations": sum(s["expected_violations"] for s in feasible_stops),
+            })
+
+    return assignments
+
+
+def format_plan(assignments, day_name, start_hour, end_hour, n_officers):
+    """Generate a realistic, per-officer patrol plan."""
+    if not assignments:
         return "No reliable hotspots found for this time window."
-    total = zones_df["expected_violations"].sum()
-    conf = zones_df["confidence"].mean()
+
+    window_hours = end_hour - start_hour
     lines = [
         f"**Patrol Plan: {day_name}, {start_hour:02d}:00 - {end_hour:02d}:00**",
         "",
-        f"{n_officers} officer(s) | {len(zones_df)} zones | ~{total:.0f} violations expected | {conf:.0f}% confidence",
+        f"{n_officers} officer(s) | {window_hours}-hour window | Bangalore traffic estimate: 20 km/h",
         "",
     ]
-    for _, row in zones_df.iterrows():
-        sn = int(row["stop_number"])
-        lat = row["latitude"]
-        lng = row["longitude"]
-        ev = row["expected_violations"]
-        cf = row["confidence"]
-        jn = " (near junction)" if row.get("junction_score", 0) > 0.3 else ""
-        lines.append(f"**Stop {sn}:** ({lat:.4f}, {lng:.4f}){jn} - ~{ev:.0f} violations ({cf:.0f}% confidence)")
+
+    total_zones = sum(a["total_zones"] for a in assignments)
+    total_violations = sum(a["expected_violations"] for a in assignments)
+    lines.append(f"**Total: {total_zones} zones reachable | ~{total_violations:.0f} expected violations**")
+    lines.append("")
+
+    for a in assignments:
+        lines.append(f"### Officer {a['officer_id']}")
+        lines.append(f"{a['total_zones']} zones | ~{a['total_km']} km | ~{a['total_min']} min total")
+        lines.append("")
+        for stop in a["stops"]:
+            lines.append(
+                f"**Stop {stop['stop_number']}:** ({stop['latitude']:.4f}, {stop['longitude']:.4f}) | "
+                f"~{stop['travel_min']:.0f} min travel | ~{stop['expected_violations']:.0f} violations "
+                f"({stop['confidence']:.0f}% conf)"
+            )
+        lines.append("")
+
     return "  \n".join(lines)
